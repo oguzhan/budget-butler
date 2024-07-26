@@ -1,5 +1,6 @@
 import streamlit as st
 import streamlit_shadcn_ui as ui
+from streamlit_extras.switch_page_button import switch_page
 from modules.pdf import PDFHelper
 from modules.config import Config
 from modules.ollama import query_ollama
@@ -8,20 +9,25 @@ import plotly.express as px
 import tempfile
 import os
 import time
+import locale
 
 
 def preprocess_amount(amount_str):
     # Remove any leading or trailing whitespace and the euro sign
-    amount_str = amount_str.strip().replace('€', '').replace('+', '')
-    
+    amount_str = amount_str.strip().replace("€", "")
+
+    # Handle negative amounts
+    multiplier = -1 if amount_str.startswith("-") else 1
+    amount_str = amount_str.lstrip("-+")
+
     # Replace comma with dot for decimal point
-    amount_str = amount_str.replace(',', '.')
-    
+    amount_str = amount_str.replace(",", ".")
+
     try:
-        return float(amount_str)
+        return multiplier * float(amount_str)
     except ValueError:
-        st.toast(f"Warning: Could not convert '{amount_str}' to float. Setting to 0.", icon="⚠️")
-        return 0
+        print(f"Warning: Could not convert '{amount_str}' to float. Setting to 0.")
+        return 0.0
 
 
 def process_files(uploaded_files):
@@ -40,16 +46,17 @@ def prepare_dataframe(transactions):
     df = pd.DataFrame(transactions)
     df["date"] = pd.to_datetime(df["date"])
     df["amount"] = df["amount"].apply(preprocess_amount)
-    print(df[['date', 'amount', 'description']].head()) 
+    print(df[["date", "amount", "description"]].head())
     return df
 
 
 def calculate_financial_overview(df):
-    total_spent = abs(df[df["amount"] < 0]["amount"].sum())
+    total_spent = -df[df["amount"] < 0]["amount"].sum()
     total_income = df[df["amount"] > 0]["amount"].sum()
-    burn_rate = total_spent / len(df["date"].dt.to_period("M").unique())
+    num_months = len(df["date"].dt.to_period("M").unique())
+    burn_rate = total_spent / num_months if num_months > 0 else 0
     savings_rate = (
-        (total_income - total_spent) / total_income * 100 if total_income > 0 else 0
+        ((total_income - total_spent) / total_income * 100) if total_income > 0 else 0
     )
     return total_spent, total_income, burn_rate, savings_rate
 
@@ -163,18 +170,15 @@ def handle_user_query(df, total_spent, total_income, burn_rate, savings_rate):
 
 
 def main():
-    st.set_page_config(page_title="BudgetButler", page_icon="💼", layout="wide")
+    st.set_page_config(page_title="BudgetButler", page_icon="💼", layout="centered")
+    st.sidebar.image("butler_logo.jpeg", use_column_width=True)
 
     if "processed" not in st.session_state:
         st.session_state.processed = False
 
-    if not st.session_state.processed:
-        st.title("BudgetButler - Your Personal Finance Advisor")
-        chat_message(
-            "Welcome to BudgetButler! I'm your Personal Finance advisor and I'll build a personal dashboard just for you. Rest assured, only you will have access to this information."
-        )
-        chat_message("Please upload your transaction PDF files to get started.")
+    st.title("BudgetButler")
 
+    if not st.session_state.processed:
         uploaded_files = st.file_uploader(
             "Upload transaction PDF files", accept_multiple_files=True, type="pdf"
         )
@@ -184,6 +188,9 @@ def main():
             transactions = process_files(uploaded_files)
             if transactions:
                 df = prepare_dataframe(transactions)
+                # Add this debug print
+                st.write("Sample of processed transactions:")
+                st.write(df[["date", "amount", "description"]].head())
                 st.session_state.df = df
                 st.session_state.processed = True
                 st.rerun()
@@ -198,25 +205,81 @@ def main():
             calculate_financial_overview(df)
         )
 
-        display_financial_overview(total_spent, total_income, burn_rate)
+        col1, col2 = st.columns(2)
+        with col1:
+            ui.metric_card(
+                title="Total Spent",
+                content=f"€{total_spent:.2f}",
+                description="Total expenses",
+                key="card1",
+            )
+            ui.metric_card(
+                title="Monthly Burn Rate",
+                content=f"€{burn_rate:.2f}",
+                description="Average monthly spending",
+                key="card3",
+            )
+        with col2:
+            ui.metric_card(
+                title="Total Income",
+                content=f"€{total_income:.2f}",
+                description="Total earnings",
+                key="card2",
+            )
+            ui.metric_card(
+                title="Savings Rate",
+                content=f"{savings_rate:.2f}%",
+                description="Current savings percentage",
+                key="card4",
+            )
 
-        subscriptions = find_subscriptions(df)
-        display_subscriptions(subscriptions)
-
+        st.subheader("Spending Trend")
         display_spending_trend(df)
 
-        chat_message(
-            f"Based on your transactions, your current savings rate is {savings_rate:.2f}%. To improve your financial health, aim for a savings rate of {savings_rate + 10:.2f}%."
-        )
-        chat_message(
-            "Consider reviewing your subscriptions and daily expenses to find areas where you can cut back."
-        )
+        st.subheader("Top Expenses")
+        display_top_expenses(df)
 
-        handle_user_query(df, total_spent, total_income, burn_rate, savings_rate)
+        st.subheader("Income vs Expenses")
+        display_income_vs_expenses(df)
+
+        if st.button("Get AI Advice"):
+            switch_page("chat")
 
         if st.button("Upload New Files"):
             st.session_state.processed = False
             st.rerun()
+
+
+def display_top_expenses(df):
+    top_expenses = (
+        df[df["amount"] < 0]
+        .groupby("description")["amount"]
+        .sum()
+        .abs()
+        .nlargest(5)
+        .reset_index()
+    )
+    fig = px.bar(top_expenses, x="description", y="amount", title="Top 5 Expenses")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def display_income_vs_expenses(df):
+    monthly_summary = (
+        df.groupby(df["date"].dt.to_period("M"))
+        .agg({"amount": lambda x: (x[x > 0].sum(), -x[x < 0].sum())})
+        .reset_index()
+    )
+    monthly_summary["date"] = monthly_summary["date"].dt.to_timestamp()
+    monthly_summary[["income", "expenses"]] = pd.DataFrame(
+        monthly_summary["amount"].tolist(), index=monthly_summary.index
+    )
+    fig = px.bar(
+        monthly_summary,
+        x="date",
+        y=["income", "expenses"],
+        title="Monthly Income vs Expenses",
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 if __name__ == "__main__":
