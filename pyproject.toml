@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "budgetbutler"
+version = "0.1.0"
+description = "AI-based personal local-first financing"
+authors = ["Oguzhan Yayla <oguzhan@oyayla.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+streamlit = "^1.37.0"
+pandas = "^2.2.2"
+plotly = "^5.23.0"
+langchain-community = "^0.2.10"
+ollama = "^0.3.0"
+pypdf2 = "^3.0.1"
+streamlit-shadcn-ui = "^0.1.18"
+black = "^24.4.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
