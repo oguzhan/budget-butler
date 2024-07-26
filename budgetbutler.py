@@ -11,18 +11,16 @@ import time
 
 
 def preprocess_amount(amount_str):
-    amount_str = amount_str.strip().replace("€", "").replace("+", "")
-    if "." in amount_str and "," in amount_str:
-        amount_str = amount_str.replace(".", "").replace(",", ".")
-    elif "," in amount_str:
-        amount_str = amount_str.replace(",", ".")
+    # Remove any leading or trailing whitespace and the euro sign
+    amount_str = amount_str.strip().replace('€', '').replace('+', '')
+    
+    # Replace comma with dot for decimal point
+    amount_str = amount_str.replace(',', '.')
+    
     try:
         return float(amount_str)
     except ValueError:
-        st.toast(
-            f"Warning: Could not convert '{amount_str}' to float. Setting to 0.",
-            icon="⚠️",
-        )
+        st.toast(f"Warning: Could not convert '{amount_str}' to float. Setting to 0.", icon="⚠️")
         return 0
 
 
@@ -42,6 +40,7 @@ def prepare_dataframe(transactions):
     df = pd.DataFrame(transactions)
     df["date"] = pd.to_datetime(df["date"])
     df["amount"] = df["amount"].apply(preprocess_amount)
+    print(df[['date', 'amount', 'description']].head()) 
     return df
 
 
