@@ -4,6 +4,7 @@ import uuid
 import json
 import re
 from pathlib import Path
+import logging
 
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -13,6 +14,9 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from modules.config import Config
 from modules.ollama import query_ollama
 from PyPDF2 import PdfReader 
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class PDFHelper:
     def __init__(self, model_name: str = Config.MODEL,
@@ -128,62 +132,101 @@ class PDFHelper:
         # return the vectorstore
         return vectorstore
     
+    
     def extract_transactions(self, pdf_file_path: str) -> list:
         full_text = self.extract_text(pdf_file_path)
         
+        logger.debug(f"Extracted text length: {len(full_text)}")
+        
         if not full_text.strip():
-            print("No text extracted from PDF.")
+            logger.warning("No text extracted from PDF.")
             return []
         
-        prompt = f"""
-        Extract all transactions from the following text. 
-        For each transaction, provide the date (in YYYY-MM-DD format), amount (in €), and description.
-        Format the response as a list of dictionaries in JSON format.
-        If no transactions are found, return an empty list.
-
-        Text:
-        {full_text}
-
-        Example output format:
-        [
-            {{"date": "2024-06-22", "amount": "-4.30", "description": "TWITTER PAID FEATURES"}},
-            {{"date": "2024-06-23", "amount": "-9.52", "description": "PROTON"}}
-        ]
-        """
+        # Split the text into smaller chunks
+        max_chunk_length = 2000  # Reduced chunk size
+        chunks = [full_text[i:i+max_chunk_length] for i in range(0, len(full_text), max_chunk_length)]
         
-        response = query_ollama(prompt, model=self._model_name)
+        logger.debug(f"Number of chunks: {len(chunks)}")
         
-        try:
-            # Clean up the response to ensure valid JSON
-            cleaned_response = re.sub(r'(\d),(\d)', r'\1\2', response)
-            transactions = json.loads(cleaned_response)
+        all_transactions = []
+        
+        for i, chunk in enumerate(chunks):
+            logger.debug(f"Processing chunk {i+1}/{len(chunks)}")
+            prompt = f"""
+            Extract ALL transactions from the following text. 
+            For each transaction, provide the date (in YYYY-MM-DD format), amount (in €), and description.
+            Format the response as a list of dictionaries in JSON format.
+            If no transactions are found, return an empty list.
+            IMPORTANT: Ensure you extract EVERY SINGLE transaction present in the text.
+
+            Text:
+            {chunk}
+
+            Example output format:
+            [
+                {{"date": "2024-06-22", "amount": "-4,30€", "description": "TWITTER PAID FEATURES"}},
+                {{"date": "2024-06-23", "amount": "-9,52€", "description": "PROTON"}}
+            ]
+            """
             
-            if isinstance(transactions, list):
-                # Clean up amount values
-                # for transaction in transactions:
-                #     transaction['amount'] = transaction['amount'].replace(',', '')
+            try:
+                response = query_ollama(prompt, model=self._model_name)
+                logger.debug(f"Ollama response for chunk {i+1}: {response[:100]}...")
+                
+                chunk_transactions = self.parse_transactions(response)
+                logger.debug(f"Number of transactions found in chunk {i+1}: {len(chunk_transactions)}")
+                all_transactions.extend(chunk_transactions)
+            except Exception as e:
+                logger.error(f"Error processing chunk {i+1}: {str(e)}")
+        
+        # Apply fallback method on the entire text if few transactions are found
+        if len(all_transactions) < 20:  # Adjust this threshold as needed
+            logger.warning("Few transactions found. Applying fallback method on entire text.")
+            fallback_transactions = self.extract_transactions_fallback(full_text)
+            if len(fallback_transactions) > len(all_transactions):
+                all_transactions = fallback_transactions
+        
+        logger.info(f"Total number of transactions extracted: {len(all_transactions)}")
+        return all_transactions
+
+    def parse_transactions(self, response):
+        try:
+            # Extract the JSON string from the response
+            json_str = re.search(r'\[.*\]', response, re.DOTALL)
+            if json_str:
+                json_str = json_str.group()
+                # Parse the JSON string
+                raw_transactions = json.loads(json_str)
+                transactions = []
+                for transaction in raw_transactions:
+                    if all(key in transaction and transaction[key] is not None for key in ['date', 'amount', 'description']):
+                        # Clean up amount value
+                        transaction['amount'] = transaction['amount'].replace('€', '').strip()
+                        transactions.append(transaction)
+                    else:
+                        logger.warning(f"Skipping invalid transaction: {transaction}")
                 return transactions
             else:
-                print(f"Unexpected response format: {cleaned_response}")
+                logger.warning("No valid JSON found in the response")
                 return []
         except json.JSONDecodeError:
-            print(f"Error decoding JSON: {response}")
-            # Attempt to extract transactions using regex if JSON parsing fails
-            return self.extract_transactions_fallback(response)
+            logger.error(f"Error decoding JSON: {response}")
+            return []
 
-
-    def extract_transactions_fallback(self, response: str) -> list:
-        pattern = r'\{\s*"date":\s*"([\d-]+)",\s*"amount":\s*"([^"]+)",\s*"description":\s*"([^"]+)"\s*\}'
-        matches = re.findall(pattern, response)
+    def extract_transactions_fallback(self, text):
+        # Improved regex pattern to match transaction details
+        pattern = r'(\d{4}-\d{2}-\d{2}).*?([-+]?\d{1,3}(?:\.\d{3})*(?:,\d{2})?€?).*?([^\n]+)'
+        matches = re.findall(pattern, text, re.DOTALL)
         transactions = []
         for match in matches:
             date, amount, description = match
-            amount = amount.replace(',', '')
+            amount = amount.replace('€', '').strip()
             transactions.append({
-                "date": date,
+                "date": date.strip(),
                 "amount": amount,
-                "description": description
+                "description": description.strip()
             })
+        logger.debug(f"Fallback method found {len(transactions)} transactions")
         return transactions
         
 __all__ = ['PDFHelper']
